@@ -5,62 +5,35 @@ namespace App\Actions\Social;
 use App\Models\Interest;
 use App\Models\MutualMatch;
 use App\Models\User;
-use Illuminate\Validation\ValidationException;
 
 /**
- * Record that one user is interested in another.
- *
- * Rules:
- *   - Both users must have locked profiles.
- *   - Users cannot express interest in themselves.
- *   - Repeated interest is idempotent.
- *   - If the target has already expressed interest in the viewer, a mutual match is created.
- *
- * No notification is sent to the target until the match is mutual.
+ * Creates an Interest row; if the target has also independently marked
+ * interest in the actor, creates a MutualMatch (§5.3 pair-ordering: always
+ * store the lexicographically smaller UUID as user_a_id).
  */
 final class RegisterInterest
 {
-    public function handle(User $viewer, User $target): Interest
+    public function handle(User $from, User $to): ?MutualMatch
     {
-        if ($viewer->id === $target->id) {
-            throw ValidationException::withMessages(['target' => 'You cannot express interest in yourself.']);
+        if ($from->id === $to->id) {
+            return null;
         }
 
-        if (! $viewer->profile_locked || ! $target->profile_locked) {
-            throw ValidationException::withMessages(['target' => 'Both profiles must be locked to express interest.']);
-        }
-
-        if ($target->isBannedOrSuspended()) {
-            throw ValidationException::withMessages(['target' => 'This user is not available right now.']);
-        }
-
-        $interest = Interest::firstOrCreate(
-            ['from_id' => $viewer->id, 'to_id' => $target->id],
+        Interest::firstOrCreate(
+            ['from_id' => $from->id, 'to_id' => $to->id],
             ['created_at' => now()]
         );
 
-        if ($this->isMutual($viewer, $target)) {
-            $this->createMutualMatch($viewer, $target);
+        $reciprocal = Interest::where('from_id', $to->id)->where('to_id', $from->id)->exists();
+
+        if (! $reciprocal) {
+            return null;
         }
 
-        return $interest;
-    }
-
-    private function isMutual(User $viewer, User $target): bool
-    {
-        return Interest::query()
-            ->where('from_id', $target->id)
-            ->where('to_id', $viewer->id)
-            ->exists();
-    }
-
-    private function createMutualMatch(User $a, User $b): MutualMatch
-    {
-        // Enforce UUID ordering so pairs are always stored consistently.
-        [$first, $second] = $a->id < $b->id ? [$a, $b] : [$b, $a];
+        [$userAId, $userBId] = $from->id < $to->id ? [$from->id, $to->id] : [$to->id, $from->id];
 
         return MutualMatch::firstOrCreate(
-            ['user_a_id' => $first->id, 'user_b_id' => $second->id],
+            ['user_a_id' => $userAId, 'user_b_id' => $userBId],
             ['matched_at' => now(), 'is_active' => true]
         );
     }

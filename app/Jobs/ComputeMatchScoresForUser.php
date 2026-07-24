@@ -9,57 +9,39 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\DB;
-use Throwable;
 
 /**
- * Compute match scores for a single viewer against every other locked user.
- *
- * Runs in the queue so that locking a profile (or re-locking after reset)
- * feels instant to the user while the N^2 score work happens asynchronously.
+ * Queued on lock-in (§6 Trigger 1) and via matches:recompute (§6 Trigger 3).
+ * Loads all other locked, active users and computes both directions for
+ * each pair, upserting match_scores. Chunked to avoid loading the entire
+ * user table into memory at once.
  */
-class ComputeMatchScoresForUser implements ShouldQueue
+final class ComputeMatchScoresForUser implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries = 3;
+    public function __construct(public readonly string $userId) {}
 
-    public array $backoff = [30, 60, 120];
-
-    public function __construct(public string $userId) {}
-
-    public function handle(ComputePairScore $pairScore): void
+    public function handle(ComputePairScore $computePairScore): void
     {
-        $viewer = User::find($this->userId);
+        $user = User::find($this->userId);
 
-        if (! $viewer || ! $viewer->profile_locked) {
+        if (! $user || ! $user->profile_locked || $user->isBannedOrSuspended()) {
             return;
         }
 
-        // Eager load everything the scoring engine needs in a single batch per target.
-        $lockedUserIds = User::query()
-            ->where('profile_locked', true)
-            ->where('id', '!=', $viewer->id)
-            ->where(function ($query) {
-                $query->whereNull('status')
-                    ->orWhereNotIn('status', ['banned', 'suspended', 'under_review']);
-            })
-            ->pluck('id');
+        User::where('profile_locked', true)
+            ->where('status', 'active')
+            ->where('id', '!=', $user->id)
+            ->chunk(200, function ($others) use ($computePairScore, $user) {
+                foreach ($others as $other) {
+                    if ($other->isBannedOrSuspended()) {
+                        continue;
+                    }
 
-        foreach ($lockedUserIds->chunk(100) as $chunk) {
-            $targets = User::query()
-                ->whereIn('id', $chunk)
-                ->with(['profile', 'preferences', 'profileFieldValues', 'preferenceFieldValues'])
-                ->get();
-
-            foreach ($targets as $target) {
-                $pairScore->handle($viewer, $target);
-            }
-        }
-    }
-
-    public function failed(Throwable $exception): void
-    {
-        report($exception);
+                    $computePairScore->handle($user, $other);
+                    $computePairScore->handle($other, $user);
+                }
+            });
     }
 }

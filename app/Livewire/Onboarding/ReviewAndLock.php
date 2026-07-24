@@ -3,6 +3,7 @@
 namespace App\Livewire\Onboarding;
 
 use App\Actions\Onboarding\LockUserProfile;
+use App\Models\FieldDefinition;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 use Livewire\Component;
@@ -22,6 +23,7 @@ class ReviewAndLock extends Component
     {
         if (! $this->confirmed) {
             $this->addError('confirmed', 'Please confirm that you understand this action is permanent.');
+
             return;
         }
 
@@ -29,6 +31,7 @@ class ReviewAndLock extends Component
             $action->handle(Auth::user());
         } catch (ValidationException $e) {
             $this->addError('lock', $e->getMessage());
+
             return;
         }
 
@@ -44,7 +47,7 @@ class ReviewAndLock extends Component
             'preferences' => $user->preferences,
             'fieldValues' => $user->profileFieldValues->keyBy('field_key'),
             'preferenceValues' => $user->preferenceFieldValues->keyBy('field_key'),
-            'fields' => \App\Models\FieldDefinition::activeOrdered()->where('is_core', false)->get(),
+            'fields' => FieldDefinition::activeOrdered()->where('is_core', false)->get(),
         ]);
     }
 }

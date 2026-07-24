@@ -3,30 +3,25 @@
 namespace App\Actions\Moderation;
 
 use App\Enums\UserStatus;
+use App\Models\MatchScore;
 use App\Models\User;
-use InvalidArgumentException;
 
 /**
- * Suspend a user for a configurable number of days.
- *
- * Suspended users cannot log in via the web or API. Their existing matches
- * and messages are preserved but the account is effectively frozen.
+ * Suspends (or moves to under_review) a user and immediately excludes them
+ * from matching (§12.5): every match_scores row where they are viewer or
+ * target is removed so they disappear from everyone's list right away.
  */
 final class SuspendUser
 {
-    public function handle(User $user, int $days, ?string $reason = null): void
+    public function handle(User $user, ?int $suspensionDays = null, ?string $status = null): User
     {
-        if ($days <= 0) {
-            throw new InvalidArgumentException('Suspension must be for at least one day.');
-        }
-
         $user->forceFill([
-            'status' => UserStatus::Suspended->value,
-            'suspension_ends_at' => now()->addDays($days),
-            'ban_reason' => $reason,
-            'banned_at' => null,
+            'status' => $status ?? UserStatus::Suspended->value,
+            'suspension_ends_at' => $suspensionDays ? now()->addDays($suspensionDays) : null,
         ])->save();
 
-        $user->tokens()->delete();
+        MatchScore::where('viewer_id', $user->id)->orWhere('target_id', $user->id)->delete();
+
+        return $user;
     }
 }

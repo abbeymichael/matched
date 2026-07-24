@@ -2,77 +2,41 @@
 
 namespace App\Services;
 
-use App\Models\Message;
-use App\Models\User;
-
 /**
- * Scan outgoing messages and other user content for safety signals.
- *
- * Implements a two-tier moderation policy (§12.4):
- *   - SEVERE: hold-before-delivery. Message is not delivered to the recipient.
- *   - MILD / contact patterns: deliver-and-flag. Message is sent but flagged for review.
- *
- * The lists are driven by config/moderation.php so they can be updated without
- * a redeploy. This is a defense-in-depth layer, not a replacement for human review.
+ * Outgoing-message content check (§12.4). Keyword/pattern lists live in
+ * config/moderation.php, not hardcoded here, so they can be updated without
+ * a code deploy. Severe matches (threats, slurs) => hold before delivery.
+ * Mild matches (profanity, contact-sharing) => deliver but flag for review.
  */
-class ModerationService
+final class ModerationService
 {
-    /**
-     * Check message content and return a moderation result.
-     *
-     * @return array{flagged: bool, severe: bool, reasons: list<string>}
-     */
-    public function checkMessage(string $body): array
+    public function check(string $text): ModerationResult
     {
-        $text = mb_strtolower($body, 'UTF-8');
-        $reasons = [];
-        $severe = false;
+        $normalized = mb_strtolower($text);
 
-        foreach ((array) config('moderation.severe_keywords', []) as $keyword) {
-            if (str_contains($text, mb_strtolower($keyword, 'UTF-8'))) {
-                $reasons[] = 'Severe keyword: ' . $keyword;
-                $severe = true;
+        foreach (config('moderation.severe_keywords', []) as $keyword) {
+            if ($this->contains($normalized, $keyword)) {
+                return new ModerationResult(flagged: true, deliver: false, reason: 'keyword_match:severe');
             }
         }
 
-        foreach ((array) config('moderation.mild_keywords', []) as $keyword) {
-            if (str_contains($text, mb_strtolower($keyword, 'UTF-8'))) {
-                $reasons[] = 'Mild keyword: ' . $keyword;
+        foreach (config('moderation.contact_patterns', []) as $pattern) {
+            if (@preg_match($pattern, $text) === 1) {
+                return new ModerationResult(flagged: true, deliver: true, reason: 'pattern_match:contact_info');
             }
         }
 
-        foreach ((array) config('moderation.contact_patterns', []) as $pattern) {
-            if (preg_match($pattern, $body)) {
-                $reasons[] = 'Contact pattern: ' . $pattern;
+        foreach (config('moderation.mild_keywords', []) as $keyword) {
+            if ($this->contains($normalized, $keyword)) {
+                return new ModerationResult(flagged: true, deliver: true, reason: 'keyword_match:mild');
             }
         }
 
-        $reasons = array_values(array_unique($reasons));
-
-        return [
-            'flagged' => $severe || ! empty($reasons),
-            'severe' => $severe,
-            'reasons' => $reasons,
-        ];
+        return new ModerationResult(flagged: false, deliver: true, reason: null);
     }
 
-    /**
-     * Determine whether a user should be auto-suspended based on their recent flag history.
-     */
-    public function shouldEscalate(User $user): bool
+    private function contains(string $haystackNormalized, string $needle): bool
     {
-        $threshold = (int) config('moderation.auto_suspend_after_flags', 3);
-
-        if ($threshold <= 0) {
-            return false;
-        }
-
-        $recentFlagCount = Message::query()
-            ->where('sender_id', $user->id)
-            ->where('flagged', true)
-            ->where('sent_at', '>=', now()->subDays(30))
-            ->count();
-
-        return $recentFlagCount >= $threshold;
+        return mb_strpos($haystackNormalized, mb_strtolower($needle)) !== false;
     }
 }

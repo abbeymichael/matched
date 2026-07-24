@@ -3,30 +3,25 @@
 namespace App\Actions\Moderation;
 
 use App\Enums\UserStatus;
+use App\Models\MatchScore;
 use App\Models\User;
-use InvalidArgumentException;
 
 /**
- * Permanently ban a user.
- *
- * Banned users cannot log in. All their active Sanctum tokens are revoked.
- * Their existing matches and messages are preserved for moderation records.
+ * Permanent ban (§12.3). Excludes the user from matching immediately and
+ * blocks login entirely (enforced by EnsureNotBanned middleware).
  */
 final class BanUser
 {
-    public function handle(User $user, ?string $reason = null): void
+    public function handle(User $user, string $reason): User
     {
-        if ($user->is_admin) {
-            throw new InvalidArgumentException('Admin users cannot be banned.');
-        }
-
         $user->forceFill([
             'status' => UserStatus::Banned->value,
             'banned_at' => now(),
-            'suspension_ends_at' => null,
             'ban_reason' => $reason,
         ])->save();
 
-        $user->tokens()->delete();
+        MatchScore::where('viewer_id', $user->id)->orWhere('target_id', $user->id)->delete();
+
+        return $user;
     }
 }
